@@ -25,8 +25,9 @@ public:
         this->intakeMotor.move_voltage(pct * 12000.0);
     }
 
+    // Brake mode, rather than a 0 V command, so a loaded mechanism does not sag.
     void hold() {
-        this->intakeMotor.move_voltage(0.0);
+        this->intakeMotor.brake();
     }
 
     void setSpeed(double speed) {
@@ -35,6 +36,10 @@ public:
 
     RunCommand *stopIntake() {
         return new RunCommand([this]() { this->setPct(0.0); }, {this});
+    }
+
+    RunCommand *holdCommand() {
+        return new RunCommand([this]() { this->hold(); }, {this});
     }
 
     RunCommand *pctCommand(double pct) {

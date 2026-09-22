@@ -354,7 +354,8 @@ inline void subsystemInit() {
     CommandScheduler::registerSubsystem(
         topIntakeSubsystem, TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, 0.0, 0.0));
     CommandScheduler::registerSubsystem(bottomIntakeSubsystem, bottomIntakeSubsystem->stopIntake());
-    CommandScheduler::registerSubsystem(grabberPivotSubsystem, grabberPivotSubsystem->stopIntake());
+    // Nothing pressed: the pivot brakes where it was left.
+    CommandScheduler::registerSubsystem(grabberPivotSubsystem, grabberPivotSubsystem->holdCommand());
     // Nothing pressed: the lift holds the angle it was released at.
     CommandScheduler::registerSubsystem(liftSubsystem, liftSubsystem->holdPositionCommand());
     CommandScheduler::registerSubsystem(goalClampSubsystem, goalClampSubsystem->levelCommand(false));
