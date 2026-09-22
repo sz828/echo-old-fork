@@ -24,9 +24,14 @@ private:
     QTime lastFree = 0.0;
 
     //descent tuning
-    double maxDownPct = 0.35;                  // cap on descent effort (0..1)
-    QAngularVelocity maxDownSpeed = 120_deg / 1_s;  // descent speed limit
+    double maxDownPct = 0.50;                  // cap on descent effort (0..1)
+    QAngularVelocity maxDownSpeed = 180_deg / 1_s;  // descent speed limit
     double kG = 0.0;                           // gravity feedforward, tune after clamps work
+    Angle landingzone = 40_deg;                      // start slowing this far above the bottom
+    QAngularVelocity landingSpeed = 60_deg / 1_s;    // speed limit at the very bottom
+    double downAccel = 900.0;                  // deg/s gained per second when starting a descent
+    QAngularVelocity downSpeed = 0.0;          // descent speed being commanded, ramps up to the limit
+
 
 public:
     explicit LiftSubsystem(const std::initializer_list<int8_t> &motors, const PID &pid) : motor(motors), pid(pid) {
@@ -43,13 +48,12 @@ public:
 
             if (command < 0.0) {
                 command = std::max(command, -maxDownPct);
-                if (velocity < -maxDownSpeed) command = 0.0;
+                if (velocity < -downSpeedLimit(position)) command = 0.0;
             }
 
             motor.move_voltage(command * 12000.0);
         }
 
-        // No-op
         if (abs(motor.get_current_draw()) < 1000) {
             lastFree = pros::millis() * millisecond;
         }
@@ -57,16 +61,35 @@ public:
         velocity = (position - lastPosition)/10_ms;
 
         lastPosition = position;
+
+    }
+
+    QAngularVelocity downSpeedLimit(Angle position) const {
+        // 1 above the landing zone, falls to 0 at the bottom
+        float t = std::clamp(position.Convert(degree) / landingzone.Convert(degree), 0.0f, 1.0f);
+        return landingSpeed + t * (maxDownSpeed - landingSpeed);
     }
 
     void setTarget(Angle angle) {
         pid.setTarget(angle.Convert(radian));
         voltage = std::nullopt;
+        downSpeed = 0.0;
     }
 
     void setVoltage(double voltage) {
-        if (voltage < 0.0 && velocity < -maxDownSpeed) voltage = 0.0;
         this->voltage = voltage;
+        if (voltage < 0.0) {
+            // Descend on the motor's own velocity loop: it brakes against gravity smoothly,
+            // where cutting to 0 V just freewheels and chatters. Speed scales with |voltage|.
+            // Ramp up from rest rather than jumping to the limit, so a short drop that starts
+            // inside the landing zone doesn't overshoot and hit the bottom hard.
+            downSpeed = std::min(downSpeed + downAccel * 10_ms * degree / second / second,
+                                 -voltage * downSpeedLimit(getPosition()));
+            double rpm = downSpeed.Convert(revolution / minute) * CONFIG::LIFT_RATIO;
+            motor.move_velocity(-rpm);
+            return;
+        }
+        downSpeed = 0.0;
         motor.move_voltage(voltage * 12000.0);
     }
 
@@ -81,20 +104,6 @@ public:
                                      }, [this, threshold, angle]() {
                                          return Qabs(this->getPosition() - angle) < threshold;
                                      }, {this});
-    }
-
-    RunCommand *controllerCommand(pros::Controller &controller, pros::controller_analog_e_t channel) {
-        Angle targetPosition = 0.0;
-        bool synced = false;
-        return new RunCommand([this, controller, targetPosition, synced, channel]() mutable {
-            if (!synced) {
-                targetPosition = this->getPosition();
-                synced = true;
-            }
-            targetPosition = targetPosition + controller.get_analog(channel) / 127.0 * 1.0_deg;
-            targetPosition = std::clamp(targetPosition, 0_deg, 130_deg);
-            this->setTarget(targetPosition);
-        }, {this});
     }
 
     FunctionalCommand *holdPositionCommand() {
