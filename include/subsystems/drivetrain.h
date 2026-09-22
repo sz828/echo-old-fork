@@ -9,8 +9,6 @@
 #include "subsystems.h"
 #include "telemetry/telemetry.h"
 
-#include "localization/gps.h"
-
 #include "auton.h"
 #include "autonomous/autons.h"
 
@@ -25,9 +23,6 @@ class DrivetrainSubsystem : public Subsystem {
 private:
     pros::MotorGroup left11W, right11W;
     pros::Imu imu;
-    pros::adi::DigitalOut pto;
-    pros::Rotation winchRotation;
-    bool ptoActive = false;
 
     QLength odomChange;
     QLength lastOdom;
@@ -35,8 +30,6 @@ private:
     ParticleFilter<CONFIG::NUM_PARTICLES> particleFilter;
 
     std::ranlux24_base de;
-
-    GpsSensor *sensor;
 
     double lastULinear = 0.0;
     double lastUAngular = 0.0;
@@ -56,13 +49,9 @@ private:
 
     pros::Rotation odom;
 
-    QLength onPtoActivateStringPosition = 0.0;
-
 public:
     DrivetrainSubsystem(const std::initializer_list<int8_t> &left11_w, const std::initializer_list<int8_t> &right11_w,
-                        pros::Imu imu, pros::adi::DigitalOut pto, pros::Rotation winchRotation,
-                        std::function<bool()> hasGoal, pros::Rotation odom) : left11W(left11_w), right11W(right11_w), imu(std::move(imu)),
-                                                         pto(std::move(pto)), winchRotation(std::move(winchRotation)),
+                        pros::Imu imu, std::function<bool()> hasGoal, pros::Rotation odom) : left11W(left11_w), right11W(right11_w), imu(std::move(imu)),
                                                          particleFilter([this, imu]() {
                                                              const Angle angle = -imu.get_rotation() * degree;
                                                              return isfinite(angle.getValue()) ? angle : 0.0;
@@ -77,8 +66,6 @@ public:
         right11W.set_encoder_units_all(pros::MotorEncoderUnits::rotations);
 
         lastOdom = this->getOdomDistance();
-
-        winchRotation.reset_position();
 
         imu.reset(pros::competition::is_autonomous() || pros::competition::is_disabled() || AUTON == SKILLS);
     }
@@ -191,15 +178,6 @@ public:
                M_PI * CONFIG::DRIVETRAIN_TUNING_SCALAR * CONFIG::DRIVE_RADIUS;
     }
 
-    QLength getStringDistance() const {
-        auto stringDistance = (this->right11W.get_position(0) + this->right11W.get_position(1) +
-                         this->left11W.get_position(0) + this->left11W.get_position(1)) *
-                            M_PI * 0.5 * CONFIG::WINCH_RADIUS +
-                        CONFIG::START_STRING_LENGTH - this->onPtoActivateStringPosition;
-
-        return stringDistance;
-    }
-
     QLength getOdomDistance() const {
         auto distance = (this->odom.get_position() / 36000.0) / CONFIG::DRIVE_RATIO * 2.0 * M_PI *
                         CONFIG::DRIVETRAIN_TUNING_SCALAR * CONFIG::DRIVE_RADIUS;
@@ -244,41 +222,6 @@ public:
 
     Eigen::Vector3f getParticle(const size_t i) { return std::move(particleFilter.getParticle(i)); }
 
-    void updateAllianceColor(Eigen::Vector3f redPosition) {
-        auto bluePosition = Eigen::Vector3f(redPosition.x(), -redPosition.y(), -redPosition.z());
-
-        pros::delay(100);
-
-        auto redWeight = 0.0;
-        auto blueWeight = 0.0;
-
-        for (int i = 0; i < 5; ++i) {
-            particleFilter.updateSensors();
-
-            redWeight += particleFilter.weightParticle(redPosition);
-            blueWeight += particleFilter.weightParticle(bluePosition);
-
-            pros::delay(20);
-        }
-
-        auto pot = pros::adi::AnalogIn('b');
-
-        if (pot.get_value() > 2000) {
-            ALLIANCE = RED;
-        } else {
-            ALLIANCE = BLUE;
-        }
-
-        // pros::lcd::set_text(0, (ALLIANCE == RED ? "RED" : "BLUE") + std::to_string(redWeight) + ", " +
-        //                                std::to_string(blueWeight));
-        std::cout << (ALLIANCE == RED ? "RED " : "BLUE ") + std::to_string(redWeight) + ", " +
-                std::to_string(blueWeight) << std::endl;
-
-        auto controller = pros::Controller(CONTROLLER_MASTER);
-
-        controller.set_text(0, 0, (ALLIANCE == RED ? "RED" : "BLUE"));
-    }
-
     void analyzeSysIdData() const {
         OneDofVelocitySystem linear;
         OneDofVelocitySystem angular;
@@ -307,68 +250,6 @@ public:
                              127.0);
             },
             {this});
-    }
-
-    InstantCommand *activatePto() {
-        return new InstantCommand(
-            [this]() {
-                this->pto.set_value(true);
-                this->onPtoActivateStringPosition = this->getStringDistance();
-            },
-            {});
-    }
-
-    InstantCommand *retractPto() {
-        return new InstantCommand(
-            [this]() {
-                this->pto.set_value(false);
-            },
-            {});
-    }
-
-    FunctionalCommand *hangController(pros::Controller &controller) {
-        return new FunctionalCommand([this]() {
-                                     },
-                                     [this, controller]() mutable {
-                                         this->setPct(controller.get_analog(ANALOG_LEFT_Y) / 127.0,
-                                                      controller.get_analog(ANALOG_LEFT_Y) / 127.0);
-                                     },
-                                     [this](bool _) {
-                                         this->pto.set_value(false);
-                                         ptoActive = false;
-                                     },
-                                     []() { return false; }, {this});
-    }
-
-    FunctionalCommand *hangOut(double pct, QLength stringLength) {
-        return new FunctionalCommand([this, pct]() mutable { this->setPct(pct, pct); std::cout << "Hang out start" << std::endl; }, [this]() {
-                                     },
-                                     [this](bool _) {
-                                         std::cout << "Hang out end" << std::endl;
-                                     },
-                                     [this, stringLength]() { return this->getStringDistance() > stringLength; },
-                                     {this});
-    }
-
-    FunctionalCommand *hangIn(double pct, QLength stringLength) {
-        return new FunctionalCommand([this, pct]() mutable { this->setPct(-pct, -pct); std::cout << "Hang in start" << std::endl; }, [this]() {
-                                     }, [this](bool _) { std::cout << "Hang in done" << std::endl; },
-                                     [this, stringLength]() { return this->getStringDistance() < stringLength; },
-                                     {this});
-    }
-
-    FunctionalCommand *hangOutNoPto(QLength stringLength) {
-        return new FunctionalCommand([this]() mutable { this->retractPto(); }, [this]() {
-                                     }, [this](bool _) { this->activatePto(); },
-                                     [this, stringLength]() { return this->getStringDistance() > stringLength; },
-                                     {this});
-    }
-
-    FunctionalCommand *hangPctCommand(double pct) {
-        return new FunctionalCommand([this, pct]() { this->setPct(pct, pct); }, [this]() mutable {
-                                     }, [this](bool _) {
-                                     },
-                                     []() { return false; }, {this});
     }
 
     FunctionalCommand *arcadeRecord(pros::Controller &controller) {

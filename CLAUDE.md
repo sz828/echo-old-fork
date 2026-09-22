@@ -3,17 +3,18 @@
 Competition code for a VEX V5RC **Override** (2026-2027) robot.
 
 This is a fork of **2654E Echo**, whose code was written for High Stakes
-(2024-2025), being ported onto a new robot. That history is visible everywhere in
-the names: `goalClamp`, `WALL_STAKE_PRIME_HEIGHT`, `getRing()`, the top intake's
-ring-colour ejection, the ladder-hang sequences. **Those names do not map onto
-Override scoring elements.** When you read a symbol, assume it means what it
-meant in High Stakes until you have checked otherwise.
+(2024-2025), being ported onto a new robot. The High Stakes mechanisms (top
+intake and ring-colour sort, clamp, hang, PTO, every pneumatic) and every
+autonomous routine and path were removed in the audit recorded in
+[`CLEANUP.md`](CLEANUP.md). Some names survive from that season —
+`bottomIntakeSubsystem`, `robotHasGoal()`, the `*_GOAL` gain sets — so when you
+read a symbol, check what it does on this robot rather than trusting the name.
 
-What has actually been ported so far is the **hardware layer**: ports, the
-subsystem list, and the driver bindings for the lift, intake/grabber and grabber
-pivot. Everything above that — the autonomous routines, the paths, the top
-intake's colour sorting, the hang — is still last season's robot playing last
-season's game. See [Ported, and not](#ported-and-not).
+What has been ported is the **hardware layer**: ports, the subsystem list, and
+the driver bindings for the lift, intake/grabber and grabber pivot. The
+drivetrain, localization and path-following code is Echo's, unchanged apart from
+the hang/PTO removal, and still tuned to Echo's chassis. There are no autonomous routines yet. See
+[Ported, and not](#ported-and-not).
 
 The framework is WPILib-style commands (`include/command/`, vendored from
 `libcommand`), plus Eigen, a units library, and a Monte Carlo particle filter for
@@ -50,21 +51,19 @@ arithmetic syntax error`, because that toolchain's `date` does not support
 
 ## Layout
 
-Almost everything is header-only; `src/` holds seven small translation units, and
+Almost everything is header-only; `src/` holds six small translation units, and
 `src/main.cpp` is the only one worth reading.
 
 | Path | Purpose |
 | --- | --- |
-| `include/config.h` | **The numbers file.** `CONFIG::` — geometry, gear ratios, lift heights, PID gains, drivetrain feedforward, distance sensor offsets. |
+| `include/config.h` | **The numbers file.** `CONFIG::` — geometry, gear ratios, PID gains, drivetrain feedforward, distance sensor offsets. The High Stakes lift heights are commented out in it. |
 | `include/subsystems/subsystems.h` | **The wiring file.** Ports, subsystem construction, every controller binding, every named command. Read this first. |
 | `include/subsystems/lift.h` | `LiftSubsystem` — DR4B, PID on position, stall-based zeroing. |
 | `include/subsystems/bottomIntake.h` | `MotorSubsystem` — a generic percent-voltage motor group. Used for the intake/grabber group *and* the grabber pivot, despite the filename. |
-| `include/subsystems/topIntake.h` | `TopIntakeSubsystem` — last season's hooked chain intake, with an optical sensor for ring colour. Still built; see below. |
-| `include/subsystems/drivetrain.h` | `DrivetrainSubsystem` — tank drive, IMU, odometry, feedforward, sysid recording, PTO and winch for the hang, and it owns the particle filter. The biggest file in the repo. |
-| `include/subsystems/solenoidSubsystem.h` | `SolenoidSubsystem` — one or more ADI digital outs driven together. |
+| `include/subsystems/drivetrain.h` | `DrivetrainSubsystem` — tank drive, IMU, odometry, feedforward, sysid recording, and it owns the particle filter. The biggest file in the repo. |
 | `include/command/` | The command framework. Vendored; do not edit. |
-| `include/commands/` | Robot-specific commands: `rotate.h`, `driveMove.h`, `ramsete.h`, `driveToGoal.h`, `ltvUnicycleController.h`, and the per-mechanism ones under `lift/` and `intake/`. |
-| `include/autonomous/` | The routine table (`autonCommands.h`) and the routines themselves. |
+| `include/commands/` | Robot-specific commands: `rotate.h`, `driveMove.h`, `ramsete.h`, and `lift/trapPosition.h`. |
+| `include/autonomous/` | The routine table (`autonCommands.h`), empty but for a commented example routine. |
 | `include/localization/` | The particle filter, and the sensor models that feed it. |
 | `include/motionProfiling/` | Bezier paths and the profiler that turns them into velocity setpoints. |
 | `include/velocityProfile/` | Trapezoidal profiles. |
@@ -72,7 +71,7 @@ Almost everything is header-only; `src/` holds seven small translation units, an
 | `include/telemetry/` | `TELEMETRY`, a serial writer on port 0 at 921600 baud. |
 | `include/auton.h`, `include/autonomous/autons.h` | The `Auton` and `Alliance` enums, the `AUTON` define, the `ALLIANCE` global. |
 | `src/main.cpp` | PROS entry points and the two background tasks. |
-| `static/` | Path JSONs, compiled into the binary as PROS assets. |
+| `static/` | Path JSONs, compiled into the binary as PROS assets. Empty until this robot has paths. |
 
 `include/Eigen`, `include/pros`, `include/json`, `include/units`,
 `include/unsupported`, `include/command`, `firmware/` and `libraries/` are
@@ -125,9 +124,9 @@ using the single-argument constructor, which takes the **general** loop. So:
 - `primary.getTrigger(DIGITAL_R1)->andOther(...)->whileTrue(...)` — polled in
   autonomous too.
 
-Every shoulder binding and the `Y` binding are composed, so **holding a shoulder
-button during autonomous drives the lift or the intake** and cancels whatever the
-routine had scheduled on it. `CommandScheduler::schedule()` does bail out when
+Every shoulder binding is composed, so **holding a shoulder button during
+autonomous drives the lift or the intake** and cancels whatever the routine had
+scheduled on it. `CommandScheduler::schedule()` does bail out when
 `pros::competition::is_disabled()`, so the disabled period is covered; the
 autonomous period is not.
 
@@ -173,8 +172,7 @@ weight. The lift avoids the problem a third way, by holding a PID target rather
 than a voltage — `holdPositionCommand()` latches the angle it was released at.
 
 **Cartridges are not set everywhere.** `DrivetrainSubsystem` calls `set_gearing`
-on both sides and `TopIntakeSubsystem` on its motor; the lift, the intake/grabber
-group and the grabber pivot never do, so they inherit whatever the brain has
+on both sides; the lift, the intake/grabber group and the grabber pivot never do, so they inherit whatever the brain has
 persisted for that port, and a motor that has lost its cable comes back on the
 VEXos default.
 This matters beyond speed and torque: `lift.get_position()` reports degrees
@@ -195,21 +193,17 @@ all round, no traction wheels.
 | Lift | 2 × 11 W | `13, -14` | **DR4B.** Keeps the carriage level, so objects stay upright. Brake hold, it backdrives under load. |
 | Intake + grabber | 1 × 11 W + 1 × 5.5 W | `3, 20` | One `MotorGroup`, so every intake command drives both. Coast when idle. |
 | Grabber pivot | 1 × 5.5 W | `12` | Wrist. Rotates the object off onto a Goal. Brake hold. |
-| Top intake | 1 × 11 W | `5` | Last season's. Still constructed. |
 
 Sensors: IMU on `8`; four distance sensors, front `18`, left `10`, right `17`,
-back `16`; rotation sensors on `9` (odometry) and `19` (winch, on the PTO);
-optical on `21`. ADI: `'a'`/`'d'` hang, `'c'` PTO, `'e'` clamp.
+back `16`; odometry rotation sensor on `9`. No pneumatics, so nothing on the ADI
+ports.
 
 The smart ports come from TheLib, as the comment above `subsystemInit()` records.
-TheLib defines no port for the top intake, the odometry rotation sensor or the
-winch, so those were put on ports it leaves free.
+TheLib defines no port for the odometry rotation sensor, so it was put on a port
+it leaves free.
 
 Power budget: `4×11 + 11 + 2×11 + 2×5.5 = 88 W`, exactly at the legal limit.
-**There are no watts spare** — and that budget leaves out the top intake on port
-5, which is an eighth 11 W motor and the tenth motor overall. With it the robot
-draws 99 W against an 88 W limit, so it is **not currently legal**. Either the
-top intake comes off or something else does.
+**There are no watts spare.**
 
 **Toggles are handled by a passive mechanism**, deliberately, for that reason.
 
@@ -252,36 +246,30 @@ button. Bindings are built in `initializeController()`.
 | `L1` / `L2` | Intake **and** grabber together, in / out |
 | `R1` / `R2` | Lift up / down, full 12 V either way |
 | `B` / `X` | Grabber pivot up / down |
-| `Y` | Lift to `DESCORE_HEIGHT`; *or*, once `hangReleased`, run the hang sequence |
-| `DOWN` | Repeating corner-clear sequence — **drives the robot** |
-| `LEFT` / `UP` | Angular / linear sysid characterization — **drives the robot** through a fixed voltage script |
-| `RIGHT` | Clamp solenoid. `whileFalse`: commanded high on release, low while held, so its resting state is high. Which of those is "clamped" depends on how the cylinder is plumbed — check the robot, not the code. |
-| `A` | Held for 200 ms, flips `ALLIANCE` to the opposing colour |
-| `L1`+`L2`+`R1`+`R2` | Hang release. `onTrue`, and it latches `hangReleased`, so it fires once and stays fired. |
 
-Everything but `A`, `RIGHT` and the hang-release combo is **hold-to-run**. A
-toggle that is out of sync with what the driver believes is on is worse than a
-button that has to be held, and none of these mechanisms has a sensor to resync
-from.
+Nothing else is bound. Every binding is **hold-to-run**. A toggle that is out of
+sync with what the driver believes is on is worse than a button that has to be
+held, and none of these mechanisms has a sensor to resync from.
 
-Two of these want a second look:
+Two upstream bindings are commented out in `initializeController()`, ready to
+bring back:
 
-- **`A` is an alliance toggle on a face button**, and `ALLIANCE` feeds the top
-  intake's colour ejection and every `flip` argument in autonomous. It takes a
-  200 ms hold, so a tap is harmless, but a lean on the controller between matches
-  is not. It belongs on a partner-controller combo.
-- **`LEFT` and `UP` run sysid.** They drive the robot at up to full voltage on a
-  timed script with no regard for where it is. Fine on blocks, not in a match.
+- **`LEFT` / `UP` — angular / linear sysid.** They drive the robot at up to full
+  voltage on a timed script with no regard for where it is. Fine on blocks, not
+  in a match.
+- **`A` — alliance toggle**, a 200 ms hold that flips `ALLIANCE`. It belongs on a
+  partner-controller combo rather than a face button.
 
 The shoulder bindings each carry `->andOther(...->negate())` for the other three
-shoulders, so that the four-shoulder hang-release combo does not also drive the
-lift and intake on its way through. `negatedHang` keeps them all off while a hang
-command is running.
+shoulders. Upstream that kept a four-shoulder hang-release combo from driving the
+lift and intake; the hang is gone, so today all it does is stop the lift and the
+intake running at the same time. Drop the cross-pair negations if the driver
+wants both at once.
 
 Releasing a button falls back to the subsystem's default command: the intake
 stops (`stopIntake()`, a 0 V command on a coast group), the pivot brakes where it
-was left (`holdCommand()`), the lift holds the angle it was released at
-(`holdPositionCommand()`), and both solenoids go low.
+was left (`holdCommand()`), and the lift holds the angle it was released at
+(`holdPositionCommand()`).
 
 The intake and grabber share `L1`/`L2` and run in the same direction, because both
 pull the object the same way through the robot. They are literally one
@@ -304,7 +292,7 @@ if loading them independently turns out to matter, that is the change to make.
   ease off, then `tare_position()`. That is the only way the lift learns where
   zero is, so **every angle in the code is relative to wherever it was tared**,
   which at boot is wherever the lift happened to be sitting. Nothing in the
-  driver bindings calls `zero()` any more; it survives only as the `resetLB` path
+  driver bindings calls `zero()`; it survives only as the `zeroLift` path
   command.
 - `positionCommand(angle, threshold)` finishes inside `threshold`; a threshold of
   `0.0` means it never finishes, so it holds until something else cancels it. Most
@@ -317,14 +305,16 @@ if loading them independently turns out to matter, that is the change to make.
 There is **no run-time selector**. Two separate switches:
 
 - `AUTON` is a **compile-time** `#define` in `include/auton.h`, currently
-  `N_1_6`. The values are in `autonomous/autons.h`: `N_1_6`, `N_1_6P`, `N_6`,
-  `P_4`, `P_1_3`, `SKILLS`, `NONE`. Changing routines means rebuilding and
-  re-uploading.
-- `ALLIANCE` is a mutable global (`inline auto ALLIANCE = RED`), changed at run
-  time by the `A` binding. `OPPONENTS` is a macro derived from it.
+  `NONE`. The values are in `autonomous/autons.h`: `SKILLS`, `NONE`. Changing
+  routines means rebuilding and re-uploading.
+- `ALLIANCE` is a mutable global (`inline auto ALLIANCE = RED`). Nothing changes
+  it at run time while the `A` binding is commented out. `OPPONENTS` is a macro
+  derived from it.
 
 `AutonomousCommands::getAuton()` is a `switch` over `AUTON` that returns one
-`Command*`, built once in `initialize()`. `autonomous()` schedules it.
+`Command*`, built once in `initialize()`. It has no cases yet, so every value
+falls through to a command that prints "No auton"; `autonCommands.h` carries a
+commented example routine to copy. `autonomous()` schedules it.
 `opcontrol()` cancels it, then — if `AUTON == SKILLS` — reschedules it until the
 partner controller's `RIGHT` is pressed, which is how skills is driven from the
 driver period.
@@ -337,11 +327,11 @@ radians, and seeds the filter with `setNorm()`. It then chains `Ramsete` motions
 over compiled-in Bezier paths, `Rotate` turns, and mechanism commands.
 
 Paths are **compiled into the binary**, not read from the SD card:
-`BEZIER_MP_ASSET(n_1_6_1_red)` expands to a PROS `ASSET` on
-`static/n_1_6_1_red.json` plus a `BezierMotionProfile` built from it at
+`BEZIER_MP_ASSET(example_1_red)` expands to a PROS `ASSET` on
+`static/example_1_red.json` plus a `BezierMotionProfile` built from it at
 initialization. Adding a path means dropping the JSON in `static/` and adding the
 macro. `BEZIER_MIRRORED_MP_ASSET` builds a red and a blue copy from one file;
-most routines instead keep two JSONs and pick with `flip`.
+Echo's routines instead kept two JSONs and picked with `flip`.
 
 Override is not colour-symmetric — Alliance Goals belong to a colour and a yellow
 Pin scores to whoever owns that quadrant's Toggle — so a red routine run on blue
@@ -381,7 +371,9 @@ standard deviation that widens as the reading's confidence drops. Readings of
 9999 mm are discarded.
 
 `gps.h` and `line.h` are other `Sensor` implementations, present but not
-constructed.
+constructed — and no longer included anywhere, so the build does not compile
+them. Expect to fix something if you wire one up. `line.h`'s field lines are
+High Stakes tape.
 
 The cloud is seeded by `initUniform(-70_in, -70_in, 70_in, 70_in, 0_deg, false)`
 in `subsystemInit()` — i.e. "somewhere on the field", converging from the distance
@@ -399,24 +391,20 @@ until it has been through the first.
 `grabberPivotSubsystem`, the lift / intake / pivot driver bindings, the default
 commands (hold, brake, coast), and the `MotorSubsystem` group-of-two intake.
 
-**Still last season's**, live in the build and reachable from a controller:
+**Echo's, kept deliberately and not yet re-tuned:** the drivetrain, the particle
+filter and its distance-sensor model, `Ramsete`, `Rotate`, `TankMotionProfiling`,
+the Bezier profiler, and sysid. The code is generic; the numbers feeding it are
+Echo's (see [Outstanding](#outstanding)).
 
-- **The top intake** (`TopIntakeSubsystem`, port 5) — a hooked chain intake with
-  optical ring-colour ejection. Built, registered, and driven by `intakeWithEject`,
-  `loadLB`, `basicLoadLB` and `cornerClearIntakeSequence`. Its motor is not in the
-  88 W budget above.
-- **The hang** — PTO, winch rotation sensor, `hangOut`/`hangIn`, `barToBarHang`,
-  and the four-shoulder release. Override's endgame is being inside the Midfield
-  boundary, not hanging from a ladder.
-- **The clamp** (`goalClampSubsystem`, ADI `'e'`) — a mobile-goal clamp. It is
-  also what `robotHasGoal()` reports, which selects between the two sets of
-  drivetrain feedforward gains.
-- **`DIGITAL_DOWN`'s corner-clear sequence** — a ring-corner routine.
-- **Every autonomous routine** in `include/autonomous/`, and every path in
-  `static/`. They are High Stakes field positions.
-- **The lift heights** in `CONFIG::` — `WALL_STAKE_LOAD_HEIGHT`,
-  `WALL_STAKE_PRIME_HEIGHT`, `DESCORE_HEIGHT`, `ALLIANCE_STAKE_SCORE_HEIGHT`.
-  `DESCORE_HEIGHT` is on `Y` today.
+- **`robotHasGoal()`** is wired to a constant `false` in `subsystemInit()` — it
+  used to read the mobile-goal clamp. The drivetrain therefore always uses the
+  `*_NO_GOAL` feedforward and `TURN_PID_NO_GOAL`. Echo switched to the `*_GOAL`
+  sets whenever the clamp closed, including mid-path in autonomous. Point the
+  lambda at a possession sensor if carrying a Cup or Pin turns out to need
+  different gains.
+
+Everything High Stakes-specific that was removed is listed in
+[`CLEANUP.md`](CLEANUP.md).
 
 ## Numbers this document and the code disagree on
 
@@ -447,22 +435,21 @@ Listed rather than resolved. Each needs a measurement, not a guess.
       `TURN_PID_NO_GOAL`, `DISTANCE_PID`, `K_s`, `DRIVETRAIN_TUNING_SCALAR`, and
       the four `DRIVETRAIN_*_VELOCITY_FF_*` rows. All fitted to Echo's chassis,
       which was a different robot with six drive motors.
-      `characterizeLinear()`/`characterizeAngular()` on `UP` and `LEFT` regenerate
-      the feedforward rows and print them over serial; the numbers still have to
-      be pasted back by hand. `robotHasGoal()` picking between the goal and
-      no-goal sets is also a High Stakes idea.
+      `characterizeLinear()`/`characterizeAngular()` regenerate the feedforward
+      rows and print them over serial; uncomment their `UP`/`LEFT` bindings to
+      run them, and paste the numbers back by hand. Only the `*_NO_GOAL` sets are
+      used while `robotHasGoal()` is fixed false.
 - [ ] **Cartridges.** Set them explicitly on the lift, intake/grabber and pivot,
       the way the drivetrain does. Until then every lift angle depends on brain
       state.
 - [ ] **Cap the 5.5 W motors.** The grabber and pivot get full 12 V from
       `pctCommand(±1.0)`.
-- [ ] **Lift angles.** The four heights in `CONFIG::` are High Stakes. Re-measure
-      against this robot's DR4B, and note they are only meaningful relative to
-      where `zero()` tares.
-- [ ] **Decide what comes off.** The top intake, hang, PTO and clamp are all
-      still built. The power budget says at least one of them cannot stay.
-- [ ] **Autonomous.** Every routine and every path is last season's field. Nothing
-      here is runnable on an Override field.
+- [ ] **Lift angles.** The High Stakes heights are commented out in `CONFIG::`.
+      Measure this robot's DR4B positions, and note they are only meaningful
+      relative to where `zero()` tares.
+- [x] **Decide what comes off.** The top intake, hang, PTO and clamp are gone;
+      the robot is at 88 W.
+- [ ] **Autonomous.** No routines or paths exist yet.
 - [ ] **A run-time selector.** `AUTON` is a `#define`, so choosing a routine at an
       event means a rebuild.
 - [ ] **Obstacles in the sensor model.** `Distance` knows only the four walls. The

@@ -13,8 +13,6 @@
 #include "command/waitCommand.h"
 #include "command/waitUntilCommand.h"
 #include "commands/driveMove.h"
-#include "commands/intake/positionCommand.h"
-#include "commands/intake/trapTopPosition.h"
 #include "commands/lift/trapPosition.h"
 #include "commands/ramsete.h"
 #include "commands/rotate.h"
@@ -22,73 +20,31 @@
 #include "lift.h"
 #include "localization/distance.h"
 #include "motionProfiling/pathCommands.h"
-#include "pros/adi.hpp"
-#include "solenoidSubsystem.h"
-#include "topIntake.h"
 
 #include <algorithm>
 #include <queue>
 
 inline DrivetrainSubsystem *drivetrainSubsystem;
-inline TopIntakeSubsystem *topIntakeSubsystem;
 inline MotorSubsystem *bottomIntakeSubsystem;
 inline MotorSubsystem *grabberPivotSubsystem;
 inline LiftSubsystem *liftSubsystem;
-inline SolenoidSubsystem *goalClampSubsystem;
-inline SolenoidSubsystem *hangSubsystem;
-
-inline Command *loadLB;
-inline Command *goalClampTrue;
-inline Command *hang;
-inline Command *barToBarHang;
-inline Command *gripBar;
-inline Command *letOutString;
-inline Command *basicLoadLB;
-inline Command *intakeNoEject;
-inline Command *topIntakeWithEject;
-inline Command *intakeWithEject;
-inline Command *bottomOuttakeWithEject;
-inline Command *hangRelease;
-inline Command *hangIdle;
-inline Command *cornerClearIntakeSequence;
 
 inline CommandController primary(pros::controller_id_e_t::E_CONTROLLER_MASTER);
 inline CommandController partner(pros::controller_id_e_t::E_CONTROLLER_PARTNER);
 
-inline Trigger *negatedHang;
-inline Trigger *negatedLBLoad;
-inline Trigger *liftLow;
-
-bool hangReleased = false;
-
 inline void initializeController() {
-    primary.getTrigger(DIGITAL_R1)
-        ->andOther(primary.getTrigger(DIGITAL_L1))
-        ->andOther(primary.getTrigger(DIGITAL_R2))
-        ->andOther(primary.getTrigger(DIGITAL_L2))
-        ->onTrue((new InstantCommand([]() { hangReleased = true; }, {}))->andThen(new ScheduleCommand(hangRelease)));
-
-    negatedHang = ((new Trigger(hangRelease))->orOther(new Trigger(hangIdle)))->negate();
-    negatedLBLoad = (new Trigger(loadLB))->negate();
-
-    liftLow = new Trigger([]() { return liftSubsystem->getPosition() < 50_deg; });
-
-    negatedHang->negate()->onTrue((new InstantCommand([]() { hangReleased = true; }, {})));
-
-    // Lift: R1 raises, R2 lowers, full 12 V either way. The L1/L2/R2 negations
-    // keep the four-shoulder hang-release combo from driving the lift.
+    // Lift: R1 raises, R2 lowers, full 12 V either way. The shoulder negations
+    // mean no two shoulders drive anything at once.
     primary.getTrigger(DIGITAL_R1)
         ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
-        ->andOther(negatedHang)
         ->whileTrue(liftSubsystem->pctCommand(1.0));
 
     primary.getTrigger(DIGITAL_R2)
         ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
-        ->andOther(negatedHang)
         ->whileTrue(liftSubsystem->pctCommand(-1.0));
 
     // Intake and grabber are one group: L1 intakes, L2 outtakes.
@@ -96,200 +52,45 @@ inline void initializeController() {
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
         ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
-        ->andOther(negatedHang)
         ->whileTrue(bottomIntakeSubsystem->pctCommand(1.0));
     primary.getTrigger(DIGITAL_L2)
         ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
-        ->andOther(negatedHang)
         ->whileTrue(bottomIntakeSubsystem->pctCommand(-1.0));
 
     // Grabber pivot: B raises, X lowers, holding position when neither is held.
     primary.getTrigger(DIGITAL_B)->whileTrue(grabberPivotSubsystem->pctCommand(1.0));
     primary.getTrigger(DIGITAL_X)->whileTrue(grabberPivotSubsystem->pctCommand(-1.0));
 
-    primary.getTrigger(DIGITAL_LEFT)->whileTrue(drivetrainSubsystem->characterizeAngular());
-    primary.getTrigger(DIGITAL_UP)->whileTrue(drivetrainSubsystem->characterizeLinear());
+    // Drivetrain sysid: drives the robot through a fixed voltage script and prints
+    // the fitted feedforward rows over serial. Bench use only, so off by default;
+    // uncomment to regenerate DRIVETRAIN_*_VELOCITY_FF_* in CONFIG::.
+    // primary.getTrigger(DIGITAL_LEFT)->whileTrue(drivetrainSubsystem->characterizeAngular());
+    // primary.getTrigger(DIGITAL_UP)->whileTrue(drivetrainSubsystem->characterizeLinear());
 
-    auto *compTrigger = new Trigger([]() { return pros::c::competition_is_field(); });
-
-    primary.getTrigger(DIGITAL_DOWN)
-        ->whileTrue((new Sequence({
-                         drivetrainSubsystem->pct(0.4, 0.4)->withTimeout(100_ms),
-                         drivetrainSubsystem->pct(0.2, 0.2)
-                             ->with(new ScheduleCommand(cornerClearIntakeSequence))
-                             ->withTimeout(600_ms),
-                         drivetrainSubsystem->pct(0.2, 0.2)->withTimeout(300_ms),
-                         drivetrainSubsystem->pct(-0.2, -0.2)
-                             ->with(new ScheduleCommand(bottomIntakeSubsystem->pctCommand(1.0)->with(
-                                 TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, 0.95, 0.0))))
-                             ->withTimeout(400_ms),
-                         drivetrainSubsystem->pct(0.0, 0.0)->withTimeout(300_ms),
-                     }))
-                        ->repeatedly());
-    primary.getTrigger(DIGITAL_RIGHT)->whileFalse(goalClampTrue);
-
-    primary.getTrigger(DIGITAL_Y)
-        ->andOther(negatedLBLoad)
-        ->andOther(liftLow)
-        ->andOther(new Trigger([]() { return !hangReleased; }))
-        ->whileTrue(liftSubsystem->positionCommand(CONFIG::DESCORE_HEIGHT, 0.0)
-                        ->race(TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, -0.4, 0.0)));
-
-    primary.getTrigger(DIGITAL_Y)
-        ->andOther(negatedLBLoad)
-        ->andOther(liftLow->negate())
-        ->andOther(new Trigger([]() { return !hangReleased; }))
-        ->whileTrue(liftSubsystem->positionCommand(CONFIG::DESCORE_HEIGHT, 0.0));
-
-    primary.getTrigger(DIGITAL_Y)->andOther(new Trigger([]() { return hangReleased; }))->whileTrue(hang);
-
-    primary.getTrigger(DIGITAL_A)->whileTrue((new WaitCommand(200_ms))
-                                                 ->andThen(new InstantCommand(
-                                                     []() {
-                                                         auto newAlliance = OPPONENTS;
-                                                         ALLIANCE = newAlliance;
-                                                     },
-                                                     {})));
+    // Alliance toggle: hold A for 200 ms to flip ALLIANCE. Wants a partner
+    // controller combo rather than a face button if it comes back.
+    // primary.getTrigger(DIGITAL_A)->whileTrue((new WaitCommand(200_ms))
+    //                                              ->andThen(new InstantCommand(
+    //                                                  []() {
+    //                                                      auto newAlliance = OPPONENTS;
+    //                                                      ALLIANCE = newAlliance;
+    //                                                  },
+    //                                                  {})));
 }
 
 inline void initializePathCommands() {
-    PathCommands::registerCommand("clamp", goalClampTrue);
-    PathCommands::registerCommand("declamp", goalClampSubsystem->levelCommand(false));
-    PathCommands::registerCommand("intakeWithEject", intakeWithEject);
-    PathCommands::registerCommand("intakeNoEject", intakeNoEject);
-    PathCommands::registerCommand("basicLoadLB", basicLoadLB);
-    PathCommands::registerCommand("basicLoadLB2Ring",
-                                  basicLoadLB->andThen(new ParallelCommandGroup(
-                                      {topIntakeSubsystem->pctCommand(0.0), bottomIntakeSubsystem->pctCommand(1.0),
-                                       liftSubsystem->positionCommand(CONFIG::WALL_STAKE_PRIME_HEIGHT, 0.0)})));
-    PathCommands::registerCommand("loadLB", loadLB);
-    PathCommands::registerCommand("bottomIntakeOffTopOn",
-                                  topIntakeSubsystem->pctCommand(1.0)->with(bottomIntakeSubsystem->pctCommand(0.0)));
-    PathCommands::registerCommand("stopIntake",
-                                  bottomIntakeSubsystem->pctCommand(0.0)->with(
-                                      TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, 0.0)));
-    PathCommands::registerCommand("stopIntake3",
-                                  TopIntakePositionCommand::fromForwardPositionCommand(topIntakeSubsystem, 3.1, 0.0));
-    PathCommands::registerCommand("hangRelease", hangRelease);
+    // Names a path JSON's "commands" table can fire mid-motion.
+    PathCommands::registerCommand("intake", bottomIntakeSubsystem->pctCommand(1.0));
+    PathCommands::registerCommand("outtake", bottomIntakeSubsystem->pctCommand(-1.0));
+    PathCommands::registerCommand("stopIntake", bottomIntakeSubsystem->pctCommand(0.0));
     PathCommands::registerCommand(
-        "resetLB", liftSubsystem->positionCommand(10_deg)->withTimeout(1_s)->andThen(liftSubsystem->zero()));
-    PathCommands::registerCommand("liftZero", liftSubsystem->positionCommand(6_deg));
-    PathCommands::registerCommand("scoreAllianceStake", liftSubsystem->positionCommand(200_deg, 0.0));
-    PathCommands::registerCommand("outtakeBottom", bottomIntakeSubsystem->pctCommand(-1.0));
-    PathCommands::registerCommand("LBdrop", liftSubsystem->positionCommand(100_deg, 0.0));
-    PathCommands::registerCommand("lbTouch", liftSubsystem->positionCommand(150_deg, 0.0));
+        "zeroLift", liftSubsystem->positionCommand(10_deg)->withTimeout(1_s)->andThen(liftSubsystem->zero()));
 }
 
-inline void initializeCommands() {
-    goalClampTrue = goalClampSubsystem->levelCommand(true);
-
-    intakeNoEject =
-        new ParallelCommandGroup({bottomIntakeSubsystem->pctCommand(1.0), topIntakeSubsystem->pctCommand(1.0)});
-
-    topIntakeWithEject =
-        (new Sequence({topIntakeSubsystem->pctCommand(1.0)->until([]() {
-                           return static_cast<Alliance>(topIntakeSubsystem->getRing()) == OPPONENTS &&
-                                  std::fmod(std::fmod(topIntakeSubsystem->getPosition(), 1.0) + 10.0, 1.0) > 0.72;
-                       }),
-                       topIntakeSubsystem->pctCommand(1.0)->withTimeout(0.05_s),
-                       topIntakeSubsystem->pctCommand(1.0)->until([]() {
-                           auto position = std::fmod(std::fmod(topIntakeSubsystem->getPosition(), 1.0) + 10.0, 1.0);
-                           return position > 0.70 && position < 0.75;
-                       }),
-                       topIntakeSubsystem->pctCommand(-1.0)->withTimeout(0.07_s)}))
-            ->repeatedly();
-
-    intakeWithEject = topIntakeWithEject->with(bottomIntakeSubsystem->pctCommand(1.0));
-    bottomOuttakeWithEject = topIntakeWithEject->with(bottomIntakeSubsystem->pctCommand(-1.0));
-    cornerClearIntakeSequence =
-        topIntakeWithEject->with(bottomIntakeSubsystem->pctCommand(1.0)->withTimeout(700_ms)->andThen(
-            bottomIntakeSubsystem->pctCommand(-1.0)->withTimeout(230_ms)->andThen(
-                bottomIntakeSubsystem->pctCommand(1.0))));
-
-    if (topIntakeSubsystem->visionConnected() && AUTON != SKILLS) {
-        basicLoadLB = new Sequence({
-            new ParallelRaceGroup({
-                bottomIntakeSubsystem->pctCommand(1.0),
-                topIntakeSubsystem->pctCommand(0.0),
-                liftSubsystem->positionCommand(CONFIG::LIFT_IDLE_POSITION, 35.0_deg),
-            }),
-            (new ParallelRaceGroup({intakeWithEject, liftSubsystem->positionCommand(CONFIG::LIFT_IDLE_POSITION, 0.0),
-                                    new WaitUntilCommand([]() {
-                                        return static_cast<Alliance>(topIntakeSubsystem->getRing()) == ALLIANCE;
-                                    })}))
-                ->until([]() { return topIntakeSubsystem->stalled(800_ms); }),
-            new ParallelRaceGroup({
-                bottomIntakeSubsystem->pctCommand(1.0),
-                topIntakeSubsystem->pctCommand(1.0)->until([]() { return topIntakeSubsystem->stalled(300_ms); }),
-                liftSubsystem->positionCommand(CONFIG::WALL_STAKE_LOAD_HEIGHT, 0.0),
-            }),
-            new ParallelRaceGroup({bottomIntakeSubsystem->pctCommand(1.0), topIntakeSubsystem->pctCommand(0.0),
-                                   liftSubsystem->positionCommand(CONFIG::WALL_STAKE_PRIME_HEIGHT, 0.0),
-                                   new WaitCommand(150_ms)}),
-        });
-    } else {
-        basicLoadLB = new Sequence({
-            new ParallelRaceGroup({
-                bottomIntakeSubsystem->pctCommand(1.0),
-                topIntakeSubsystem->pctCommand(0.0),
-                liftSubsystem->positionCommand(CONFIG::LIFT_IDLE_POSITION, 35.0_deg),
-            }),
-            new ParallelRaceGroup({
-                bottomIntakeSubsystem->pctCommand(1.0),
-                topIntakeSubsystem->pctCommand(1.0)->until([]() { return topIntakeSubsystem->stalled(300_ms); }),
-                liftSubsystem->positionCommand(CONFIG::WALL_STAKE_LOAD_HEIGHT, 0.0),
-            }),
-            new ParallelRaceGroup({bottomIntakeSubsystem->pctCommand(1.0), topIntakeSubsystem->pctCommand(0.0),
-                                   liftSubsystem->positionCommand(CONFIG::WALL_STAKE_PRIME_HEIGHT, 0.0),
-                                   new WaitCommand(150_ms)}),
-        });
-    }
-
-    loadLB = new Sequence(
-        {basicLoadLB, new ScheduleCommand(liftSubsystem->positionCommand(CONFIG::WALL_STAKE_PRIME_HEIGHT, 0.0))});
-
-    letOutString =
-        (new ParallelRaceGroup({drivetrainSubsystem->hangOut(1.0, -5.0_in), hangSubsystem->levelCommand(false),
-                                liftSubsystem->positionCommand(70_deg, 0.0)}))
-            ->andThen(new ParallelRaceGroup({
-                drivetrainSubsystem->hangOut(1.0, 7.5_in),
-                hangSubsystem->levelCommand(false)
-                    ->with(liftSubsystem->positionCommand(15_deg, 0.0))
-                    ->until([]() { return drivetrainSubsystem->getStringDistance() > 4.2_in; })
-                    ->andThen(hangSubsystem->levelCommand(true)->with(liftSubsystem->positionCommand(70_deg, 0.0))),
-            }));
-
-    gripBar = new Sequence(
-        {new ParallelRaceGroup({drivetrainSubsystem->hangIn(1.0, -6.9_in), hangSubsystem->levelCommand(true),
-                                liftSubsystem->positionCommand(70_deg, 0.0)}),
-         new ParallelRaceGroup({drivetrainSubsystem->hangIn(1.0, -7.4_in), hangSubsystem->levelCommand(false),
-                                liftSubsystem->positionCommand(70_deg, 0.0)})});
-
-    barToBarHang = new Sequence({letOutString, gripBar});
-
-    hang = new ParallelRaceGroup(
-        {new Sequence({
-             drivetrainSubsystem->activatePto(),
-             drivetrainSubsystem->pct(-0.1, -0.1)->withTimeout(70_ms),
-             drivetrainSubsystem->pct(0.1, 0.1)->withTimeout(70_ms),
-             gripBar,
-             barToBarHang,
-             barToBarHang,
-             (new ParallelRaceGroup({drivetrainSubsystem->hangOut(1.0, -5.0_in), hangSubsystem->levelCommand(false),
-                                     liftSubsystem->positionCommand(70_deg, 0.0)})),
-         }),
-         topIntakeSubsystem->pctCommand(0.0), bottomIntakeSubsystem->pctCommand(0.0)});
-
-    hangRelease =
-        new ParallelCommandGroup({hangSubsystem->levelCommand(true), liftSubsystem->positionCommand(90_deg, 0.0),
-                                  topIntakeSubsystem->pctCommand(0.0), bottomIntakeSubsystem->pctCommand(0.0)});
-
-    hangIdle =
-        new ParallelCommandGroup({hangSubsystem->levelCommand(false), liftSubsystem->positionCommand(30_deg, 0.0),
-                                  topIntakeSubsystem->pctCommand(0.0), bottomIntakeSubsystem->pctCommand(0.0)});
-}
+// Named Command* globals that the bindings and path commands share are built here.
+inline void initializeCommands() {}
 
 inline void subsystemInit() {
     TELEMETRY.setSerial(new pros::Serial(0, 921600));
@@ -301,30 +102,20 @@ inline void subsystemInit() {
     //   intake        3          grabber      20   (linked as one group)
     //   grabber pivot 12
     //   distance: front 18, left 10, right 17, back 16
-    // TheLib defines no port for the top intake, the odometry rotation sensor or
-    // the winch rotation sensor, so those sit on ports TheLib leaves free
-    // (5, 9, 19; optical stays on 21). ADI ports are unchanged:
-    // 'a'/'d' hang, 'c' pto, 'e' back clamp.
+    // TheLib defines no port for the odometry rotation sensor, so it sits on 9,
+    // which TheLib leaves free.
 
-    topIntakeSubsystem = new TopIntakeSubsystem({5}, pros::Optical(21));
-    // Intake and grabber run as one group, so every existing intake command
-    // drives both motors together.
+    // Intake and grabber run as one group, so every intake command drives both
+    // motors together.
     bottomIntakeSubsystem = new MotorSubsystem({3, 20});
     grabberPivotSubsystem = new MotorSubsystem({12}, pros::MotorBrake::hold);
     liftSubsystem = new LiftSubsystem({-13, 14}, PID(1.2, 0.0, 3.0, 0.2, 1.0));
-    goalClampSubsystem = new SolenoidSubsystem(pros::adi::DigitalOut('e'));
-    hangSubsystem = new SolenoidSubsystem({pros::adi::DigitalOut('a'), pros::adi::DigitalOut('d')});
-    drivetrainSubsystem = new DrivetrainSubsystem(
-        {-2, -7}, {4, 6}, pros::Imu(8), pros::adi::DigitalOut('c'), pros::Rotation(19),
-        []() { return goalClampSubsystem->getLastValue(); },
-        pros::Rotation(9)); // 19 winch rotation on the pto, 9 odom rotation
+    // hasGoal is fixed false: nothing on this robot reports possession yet, so the
+    // drivetrain always uses the *_NO_GOAL feedforward and turn gains.
+    drivetrainSubsystem = new DrivetrainSubsystem({-2, -7}, {4, 6}, pros::Imu(8), []() { return false; },
+                                                  pros::Rotation(9)); // 9 odom rotation
 
     pros::Task([]() {
-        if (!topIntakeSubsystem->visionConnected()) {
-            primary.rumble(".. --");
-            pros::delay(2000);
-        }
-
         if (!drivetrainSubsystem->odomConnected()) {
             primary.rumble("-- --");
             pros::delay(2000);
@@ -336,9 +127,8 @@ inline void subsystemInit() {
         }
 
         // Check motor temps
-        if (std::max({drivetrainSubsystem->getTopMotorTemp(), topIntakeSubsystem->getTopMotorTemp(),
-                      bottomIntakeSubsystem->getTopMotorTemp(), grabberPivotSubsystem->getTopMotorTemp(),
-                      liftSubsystem->getTopMotorTemp()}) >= 45.0) {
+        if (std::max({drivetrainSubsystem->getTopMotorTemp(), bottomIntakeSubsystem->getTopMotorTemp(),
+                      grabberPivotSubsystem->getTopMotorTemp(), liftSubsystem->getTopMotorTemp()}) >= 45.0) {
             primary.rumble(".--");
         }
     });
@@ -351,15 +141,11 @@ inline void subsystemInit() {
     drivetrainSubsystem->initUniform(-70_in, -70_in, 70_in, 70_in, 0_deg, false);
 
     CommandScheduler::registerSubsystem(drivetrainSubsystem, drivetrainSubsystem->tank(primary));
-    CommandScheduler::registerSubsystem(
-        topIntakeSubsystem, TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, 0.0, 0.0));
     CommandScheduler::registerSubsystem(bottomIntakeSubsystem, bottomIntakeSubsystem->stopIntake());
     // Nothing pressed: the pivot brakes where it was left.
     CommandScheduler::registerSubsystem(grabberPivotSubsystem, grabberPivotSubsystem->holdCommand());
     // Nothing pressed: the lift holds the angle it was released at.
     CommandScheduler::registerSubsystem(liftSubsystem, liftSubsystem->holdPositionCommand());
-    CommandScheduler::registerSubsystem(goalClampSubsystem, goalClampSubsystem->levelCommand(false));
-    CommandScheduler::registerSubsystem(hangSubsystem, hangSubsystem->levelCommand(false));
 
     initializeCommands();
     initializeController();
