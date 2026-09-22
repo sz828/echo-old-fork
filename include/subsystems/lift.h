@@ -1,6 +1,8 @@
 #pragma once
 
 #include <utility>
+#include <algorithm>
+#include <cmath>
 #include "command/runCommand.h"
 
 #include "command/subsystem.h"
@@ -21,6 +23,11 @@ private:
 
     QTime lastFree = 0.0;
 
+    //descent tuning
+    double maxDownPct = 0.35;                  // cap on descent effort (0..1)
+    QAngularVelocity maxDownSpeed = 120_deg / 1_s;  // descent speed limit
+    double kG = 0.0;                           // gravity feedforward, tune after clamps work
+
 public:
     explicit LiftSubsystem(const std::initializer_list<int8_t> &motors, const PID &pid) : motor(motors), pid(pid) {
         motor.set_encoder_units_all(pros::MotorEncoderUnits::rotations);
@@ -31,7 +38,14 @@ public:
     void periodic() override {
         auto position = this->getPosition();
         if (!voltage.has_value()) {
-            const auto command = pid.update(position.Convert(radian));
+            auto command = pid.update(position.Convert(radian));
+            command += kG * std::cos(position.Convert(radian));
+
+            if (command < 0.0) {
+                command = std::max(command, -maxDownPct);
+                if (velocity < -maxDownSpeed) command = 0.0;
+            }
+
             motor.move_voltage(command * 12000.0);
         }
 
@@ -51,6 +65,7 @@ public:
     }
 
     void setVoltage(double voltage) {
+        if (voltage < 0.0 && velocity < -maxDownSpeed) voltage = 0.0;
         this->voltage = voltage;
         motor.move_voltage(voltage * 12000.0);
     }
@@ -70,7 +85,12 @@ public:
 
     RunCommand *controllerCommand(pros::Controller &controller, pros::controller_analog_e_t channel) {
         Angle targetPosition = 0.0;
-        return new RunCommand([this, controller, targetPosition, channel]() mutable {
+        bool synced = false;
+        return new RunCommand([this, controller, targetPosition, synced, channel]() mutable {
+            if (!synced) {
+                targetPosition = this->getPosition();
+                synced = true;
+            }
             targetPosition = targetPosition + controller.get_analog(channel) / 127.0 * 1.0_deg;
             targetPosition = std::clamp(targetPosition, 0_deg, 130_deg);
             this->setTarget(targetPosition);

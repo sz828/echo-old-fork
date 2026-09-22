@@ -311,7 +311,7 @@ inline void subsystemInit() {
     // drives both motors together.
     bottomIntakeSubsystem = new MotorSubsystem({3, 20});
     grabberPivotSubsystem = new MotorSubsystem({12}, pros::MotorBrake::hold);
-    liftSubsystem = new LiftSubsystem({13, -14}, PID(1.2, 0.0, 3.0, 0.2, 1.0));
+    liftSubsystem = new LiftSubsystem({-13, 14}, PID(1.2, 0.0, 3.0, 0.2, 1.0));
     goalClampSubsystem = new SolenoidSubsystem(pros::adi::DigitalOut('e'));
     hangSubsystem = new SolenoidSubsystem({pros::adi::DigitalOut('a'), pros::adi::DigitalOut('d')});
     drivetrainSubsystem = new DrivetrainSubsystem(
