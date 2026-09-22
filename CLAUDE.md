@@ -36,9 +36,17 @@ compiled there. Verify logic with a host-side harness (`g++`) where the code is
 pure maths, and leave the real build to the user's machine.
 
 On the user's machine the toolchain *is* installed, by the PROS VS Code
-extension, and `make` works. One catch: it defaults to `C:\WINDOWS\` for
-temporary files and dies with "Cannot create temporary file". Point `TMP` at a
-writable directory first.
+extension, and `make` works. GCC there falls back to `C:\WINDOWS\` for temporary
+files when `TMP`/`TEMP` don't reach it, and dies with "Cannot create temporary
+file"; the `Makefile` now exports `TMPDIR`/`TMP`/`TEMP` pointing at `bin/tmp`,
+so this should no longer need doing by hand.
+
+`pros build` uses whatever toolchain the `PROS_TOOLCHAIN` environment variable
+names. If it points at another project's bundled toolchain (TheLib ships one in
+`.tools/pros-toolchain`), the build fails at "Adding timestamp" with `sh:
+arithmetic syntax error`, because that toolchain's `date` does not support
+`%-z`. Point it at the extension's install instead:
+`%APPDATA%\Code\User\globalStorage\sigbots.pros\install\pros-toolchain-windows\usr`.
 
 ## Layout
 

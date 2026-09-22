@@ -43,6 +43,15 @@ TEMPLATE_FILES=$(INCDIR)/$(LIBNAME)/*.h $(INCDIR)/$(LIBNAME)/*.hpp
 
 MAKEFLAGS += -j8
 
+# GCC on Windows falls back to C:\WINDOWS\ for temporary files when TMP/TEMP
+# don't reach it, and dies with "Cannot create temporary file". Give every
+# compiler invocation a writable temp directory inside the (gitignored) bin/.
+BUILDTMP:=$(abspath $(BINDIR))/tmp
+$(shell mkdir -p $(BINDIR)/tmp)
+export TMPDIR:=$(BUILDTMP)
+export TMP:=$(BUILDTMP)
+export TEMP:=$(BUILDTMP)
+
 ################################################################################
 ################################################################################
 ########## Nothing below this line should be edited by typical users ###########
