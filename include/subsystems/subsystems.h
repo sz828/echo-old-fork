@@ -32,6 +32,7 @@
 inline DrivetrainSubsystem *drivetrainSubsystem;
 inline TopIntakeSubsystem *topIntakeSubsystem;
 inline MotorSubsystem *bottomIntakeSubsystem;
+inline MotorSubsystem *grabberPivotSubsystem;
 inline LiftSubsystem *liftSubsystem;
 inline SolenoidSubsystem *goalClampSubsystem;
 inline SolenoidSubsystem *hangSubsystem;
@@ -61,8 +62,6 @@ inline Trigger *liftLow;
 bool hangReleased = false;
 
 inline void initializeController() {
-    primary.getTrigger(DIGITAL_X)->toggleOnTrue(drivetrainSubsystem->arcade(primary));
-
     primary.getTrigger(DIGITAL_R1)
         ->andOther(primary.getTrigger(DIGITAL_L1))
         ->andOther(primary.getTrigger(DIGITAL_R2))
@@ -76,42 +75,39 @@ inline void initializeController() {
 
     negatedHang->negate()->onTrue((new InstantCommand([]() { hangReleased = true; }, {})));
 
+    // Lift: R1 raises, R2 lowers, full 12 V either way. The L1/L2/R2 negations
+    // keep the four-shoulder hang-release combo from driving the lift.
     primary.getTrigger(DIGITAL_R1)
         ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
-        ->andOther(negatedHang->negate())
-        ->onTrue(hangIdle)
-        ->onFalse(hangRelease);
-
-    primary.getTrigger(DIGITAL_L1)
-        ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
-        ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
-        ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
         ->andOther(negatedHang)
-        ->andOther(negatedLBLoad)
-        ->onTrue(bottomIntakeSubsystem->pctCommand(-1.0))
-        ->onFalse(bottomIntakeSubsystem->pctCommand(1.0));
-    primary.getTrigger(DIGITAL_L2)
-        ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
-        ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
-        ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
-        ->andOther(negatedHang)
-        ->andOther(negatedLBLoad)
-        ->whileTrue(liftSubsystem->positionCommand(240_deg, 0.0));
+        ->whileTrue(liftSubsystem->pctCommand(1.0));
 
     primary.getTrigger(DIGITAL_R2)
         ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
         ->andOther(negatedHang)
-        ->toggleOnTrue(topIntakeWithEject->with(new ScheduleCommand(bottomIntakeSubsystem->pctCommand(1.0))));
-    primary.getTrigger(DIGITAL_R1)
-        ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
-        ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
+        ->whileTrue(liftSubsystem->pctCommand(-1.0));
+
+    // Intake and grabber are one group: L1 intakes, L2 outtakes.
+    primary.getTrigger(DIGITAL_L1)
         ->andOther(primary.getTrigger(DIGITAL_L2)->negate())
+        ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
+        ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
         ->andOther(negatedHang)
-        ->toggleOnTrue(loadLB);
+        ->whileTrue(bottomIntakeSubsystem->pctCommand(1.0));
+    primary.getTrigger(DIGITAL_L2)
+        ->andOther(primary.getTrigger(DIGITAL_L1)->negate())
+        ->andOther(primary.getTrigger(DIGITAL_R1)->negate())
+        ->andOther(primary.getTrigger(DIGITAL_R2)->negate())
+        ->andOther(negatedHang)
+        ->whileTrue(bottomIntakeSubsystem->pctCommand(-1.0));
+
+    // Grabber pivot: B raises, X lowers, holding position when neither is held.
+    primary.getTrigger(DIGITAL_B)->whileTrue(grabberPivotSubsystem->pctCommand(1.0));
+    primary.getTrigger(DIGITAL_X)->whileTrue(grabberPivotSubsystem->pctCommand(-1.0));
 
     primary.getTrigger(DIGITAL_LEFT)->whileTrue(drivetrainSubsystem->characterizeAngular());
     primary.getTrigger(DIGITAL_UP)->whileTrue(drivetrainSubsystem->characterizeLinear());
@@ -148,9 +144,6 @@ inline void initializeController() {
         ->whileTrue(liftSubsystem->positionCommand(CONFIG::DESCORE_HEIGHT, 0.0));
 
     primary.getTrigger(DIGITAL_Y)->andOther(new Trigger([]() { return hangReleased; }))->whileTrue(hang);
-
-    primary.getTrigger(DIGITAL_B)->onTrue(
-        liftSubsystem->positionCommand(10_deg)->withTimeout(1_s)->andThen(liftSubsystem->zero()));
 
     primary.getTrigger(DIGITAL_A)->whileTrue((new WaitCommand(200_ms))
                                                  ->andThen(new InstantCommand(
@@ -301,36 +294,30 @@ inline void initializeCommands() {
 inline void subsystemInit() {
     TELEMETRY.setSerial(new pros::Serial(0, 921600));
 
-    // 'd' is hang - done
-    // 'a' is hang - done
-    // 'e' is back clamp - done
-    // 'c' is pto - done
-    // 'b' is potentiometer - done
-    // 5 is inertial
-    // 6 is top intake motor
-    // 3 is rotation on odom
-    // 2 is right distance sensor
-    // 9 is back distance sensor
-    // 19 is left distance sensor
-    // 20 is the front distance sensor
-    // 15 is lb oppisite of last bot
-    // 12 is bottom intake
-    // 4 is back right drive motor - reversed
-    // 7 is middle drive mtoro right
-    // 10 is front drive motor right
-    // 16 is back left drive motor - reversed
-    // 17 is front drive motor left
-    // 18 middle drive motor left
+    // Smart ports below come from TheLib (TheLib-main/src/main.cpp):
+    //   left drive   -2, -7      right drive   4, 6
+    //   inertial      8
+    //   lift         13, -14
+    //   intake        3          grabber      20   (linked as one group)
+    //   grabber pivot 12
+    //   distance: front 18, left 10, right 17, back 16
+    // TheLib defines no port for the top intake, the odometry rotation sensor or
+    // the winch rotation sensor, so those sit on ports TheLib leaves free
+    // (5, 9, 19; optical stays on 21). ADI ports are unchanged:
+    // 'a'/'d' hang, 'c' pto, 'e' back clamp.
 
-    topIntakeSubsystem = new TopIntakeSubsystem({6}, pros::Optical(21));
-    bottomIntakeSubsystem = new MotorSubsystem(pros::Motor(-12));
-    liftSubsystem = new LiftSubsystem({-15}, PID(1.2, 0.0, 3.0, 0.2, 1.0));
+    topIntakeSubsystem = new TopIntakeSubsystem({5}, pros::Optical(21));
+    // Intake and grabber run as one group, so every existing intake command
+    // drives both motors together.
+    bottomIntakeSubsystem = new MotorSubsystem({3, 20});
+    grabberPivotSubsystem = new MotorSubsystem({12}, pros::MotorBrake::hold);
+    liftSubsystem = new LiftSubsystem({13, -14}, PID(1.2, 0.0, 3.0, 0.2, 1.0));
     goalClampSubsystem = new SolenoidSubsystem(pros::adi::DigitalOut('e'));
     hangSubsystem = new SolenoidSubsystem({pros::adi::DigitalOut('a'), pros::adi::DigitalOut('d')});
     drivetrainSubsystem = new DrivetrainSubsystem(
-        {16, -17, -18}, {-4, 7, 10}, pros::Imu(5), pros::adi::DigitalOut('c'), pros::Rotation(-8),
+        {-2, -7}, {4, 6}, pros::Imu(8), pros::adi::DigitalOut('c'), pros::Rotation(19),
         []() { return goalClampSubsystem->getLastValue(); },
-        pros::Rotation(3)); // wheels listed back to front; 8 for rotation sensor on pto
+        pros::Rotation(9)); // 19 winch rotation on the pto, 9 odom rotation
 
     pros::Task([]() {
         if (!topIntakeSubsystem->visionConnected()) {
@@ -350,15 +337,16 @@ inline void subsystemInit() {
 
         // Check motor temps
         if (std::max({drivetrainSubsystem->getTopMotorTemp(), topIntakeSubsystem->getTopMotorTemp(),
-                      bottomIntakeSubsystem->getTopMotorTemp(), liftSubsystem->getTopMotorTemp()}) >= 45.0) {
+                      bottomIntakeSubsystem->getTopMotorTemp(), grabberPivotSubsystem->getTopMotorTemp(),
+                      liftSubsystem->getTopMotorTemp()}) >= 45.0) {
             primary.rumble(".--");
         }
     });
 
-    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_LEFT_OFFSET, 0.987, pros::Distance(19)));
-    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_FRONT_OFFSET, 0.986, pros::Distance(20)));
-    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_RIGHT_OFFSET, 0.980, pros::Distance(2)));
-    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_BACK_OFFSET, 0.979, pros::Distance(9)));
+    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_LEFT_OFFSET, 0.987, pros::Distance(10)));
+    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_FRONT_OFFSET, 0.986, pros::Distance(18)));
+    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_RIGHT_OFFSET, 0.980, pros::Distance(17)));
+    drivetrainSubsystem->addLocalizationSensor(new Distance(CONFIG::DISTANCE_BACK_OFFSET, 0.979, pros::Distance(16)));
 
     drivetrainSubsystem->initUniform(-70_in, -70_in, 70_in, 70_in, 0_deg, false);
 
@@ -366,7 +354,9 @@ inline void subsystemInit() {
     CommandScheduler::registerSubsystem(
         topIntakeSubsystem, TopIntakePositionCommand::fromClosePositionCommand(topIntakeSubsystem, 0.0, 0.0));
     CommandScheduler::registerSubsystem(bottomIntakeSubsystem, bottomIntakeSubsystem->stopIntake());
-    CommandScheduler::registerSubsystem(liftSubsystem, liftSubsystem->positionCommand(CONFIG::LIFT_IDLE_POSITION, 0.0));
+    CommandScheduler::registerSubsystem(grabberPivotSubsystem, grabberPivotSubsystem->stopIntake());
+    // Nothing pressed: the lift holds the angle it was released at.
+    CommandScheduler::registerSubsystem(liftSubsystem, liftSubsystem->holdPositionCommand());
     CommandScheduler::registerSubsystem(goalClampSubsystem, goalClampSubsystem->levelCommand(false));
     CommandScheduler::registerSubsystem(hangSubsystem, hangSubsystem->levelCommand(false));
 

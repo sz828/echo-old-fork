@@ -5,14 +5,16 @@
 #include "command/runCommand.h"
 
 #include "pros/motors.hpp"
+#include "pros/motor_group.hpp"
 
 class MotorSubsystem : public Subsystem {
-    pros::Motor intakeMotor;
+    pros::MotorGroup intakeMotor;
 
 public:
-    explicit MotorSubsystem(pros::Motor intake_motor) :
-        intakeMotor(std::move(intake_motor)) {
+    explicit MotorSubsystem(const std::initializer_list<int8_t> &motors,
+                            const pros::MotorBrake brake = pros::MotorBrake::coast) : intakeMotor(motors) {
         intakeMotor.set_encoder_units_all(pros::MotorEncoderUnits::rotations);
+        intakeMotor.set_brake_mode_all(brake);
     }
 
     void periodic() override {
@@ -21,6 +23,10 @@ public:
 
     void setPct(const double pct) {
         this->intakeMotor.move_voltage(pct * 12000.0);
+    }
+
+    void hold() {
+        this->intakeMotor.move_voltage(0.0);
     }
 
     void setSpeed(double speed) {

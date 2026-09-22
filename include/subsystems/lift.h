@@ -24,6 +24,7 @@ private:
 public:
     explicit LiftSubsystem(const std::initializer_list<int8_t> &motors, const PID &pid) : motor(motors), pid(pid) {
         motor.set_encoder_units_all(pros::MotorEncoderUnits::rotations);
+        motor.set_brake_mode_all(pros::MotorBrake::hold);
         motor.tare_position_all();
     }
 
@@ -51,7 +52,7 @@ public:
 
     void setVoltage(double voltage) {
         this->voltage = voltage;
-        motor.move_voltage(voltage * 8000.0);
+        motor.move_voltage(voltage * 12000.0);
     }
 
     Angle getPosition() const {
@@ -78,9 +79,7 @@ public:
 
     FunctionalCommand *holdPositionCommand() {
         return new FunctionalCommand([this]() {
-                                         this->setTarget(
-                                             this->getPosition() + 5 *
-                                             degree);
+                                         this->setTarget(this->getPosition());
                                      }, []() {
                                      }, [](bool _) {
                                      }, []() { return false; }, {this});
